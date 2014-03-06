@@ -1,0 +1,5 @@
+# Camnode Configuration
+
+clientId     = "Your Client ID Here"
+clientSecret = "Your Client Secret Here"
+oauth_code   = "Your Oauth Code Here"

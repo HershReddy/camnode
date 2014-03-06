@@ -51,6 +51,7 @@ type CheckStatusMessage struct {
 
 type UpdateServerMessage struct {
 	LatestImageURL string
+	UpdateImage    bool
 }
 
 const (
@@ -64,7 +65,7 @@ const (
 
 	fileName       = "./test.jpg"                               // The name of the local file to upload.
 	objectPath     = "parkingspots/imgs/" + location_name + "/" // This can be changed to any valid object path.
-	sleep_duration = time.Second * 10                           // client pings server once in sleep_duration
+	sleep_duration = time.Second * 2                            // client pings server once in sleep_duration
 
 	// For the basic sample, these variables need not be changed.
 	scope       = storage.DevstorageFull_controlScope
@@ -161,11 +162,12 @@ func main() {
 	count := 0
 	for {
 		count++
-		fmt.Printf("In update/check loop. Count: %d \n", count)
+		//fmt.Printf("In update/check loop. Count: %d \n", count)
 
+		// sleep for a while so we aren't just pinging the server like crazy
 		time.Sleep(sleep_duration)
-		// check server to see if someone has requested a new picture
 
+		// check server to see if someone has requested a new picture
 		checkURL := url.URL{
 			Path:   server_check_path + "/" + location_name,
 			Host:   server_host,
@@ -177,8 +179,8 @@ func main() {
 			continue
 		}
 		body, err := ioutil.ReadAll(resp.Body)
-		fmt.Print("\n JSON received from clientcheck URL:\n")
-		fmt.Print(string(body), "\n")
+		//fmt.Print("\n JSON received from clientcheck URL:\n")
+		//fmt.Print(string(body), "\n")
 
 		var csm CheckStatusMessage
 		err = json.Unmarshal(body, &csm)
@@ -187,11 +189,13 @@ func main() {
 			log.Fatal("JSON parameters from server in CheckStatusMessage could not be loaded:", err)
 		}
 
-		fmt.Print(csm)
+		//fmt.Print(csm)
 		resp.Body.Close()
 
+		var LatestImageURL string
+		var UpdateImage bool
 		if csm.NewPicRequested {
-
+			UpdateImage = true
 			fmt.Printf("Taking picture.  Count is: %v \n", count)
 			// take a picture and store it to a local file
 			if !*test {
@@ -208,7 +212,7 @@ func main() {
 			objectName := objectPath + strings.Replace(time.Now().String(), " ", "_", -1)
 			object := &storage.Object{Name: objectName}
 			file, err := os.Open(fileName)
-			var LatestImageURL string
+
 			if err != nil {
 				fatalf(service, "Error opening %q: %v", fileName, err)
 			}
@@ -229,39 +233,41 @@ func main() {
 			} else {
 				fatalf(service, "Failed to insert ACL for %s/%s: %v.", bucketName, objectName, err)
 			}
-
-			// Inform the server about the location of the new picture that has been uploaded to the cloud
-			updateURL := url.URL{
-				Path:   server_update_path + "/" + location_name,
-				Host:   server_host,
-				Scheme: "http",
-			}
-
-			usm := UpdateServerMessage{
-				LatestImageURL: LatestImageURL,
-			}
-			b, err := json.Marshal(usm)
-			if err != nil {
-				fmt.Printf("Failed to Marshal serve update data into JSON: %v", usm)
-			}
-
-			fmt.Printf("\nUpdating server at: %s \n", updateURL.String())
-
-			buf := bytes.NewBuffer(b)
-			fmt.Printf("JSON being sent to update link is: %v \n", buf)
-
-			resp, err = http.Post(updateURL.String(), "application/json", buf)
-			if err != nil {
-				fmt.Printf("Failed to connect to server at %v.  Error: %v", updateURL.String(), err)
-				continue
-			}
-
-			body, err := ioutil.ReadAll(resp.Body)
-			fmt.Print("\n Response received from POST to update url:\n")
-			fmt.Print(string(body), "\n")
-
+		} else {
+			UpdateImage = false
+			LatestImageURL = ""
 		}
 
-	}
+		// Update the server: e.g. link to new picture for the location
+		updateURL := url.URL{
+			Path:   server_update_path + "/" + location_name,
+			Host:   server_host,
+			Scheme: "http",
+		}
 
+		usm := UpdateServerMessage{
+			LatestImageURL: LatestImageURL,
+			UpdateImage:    UpdateImage,
+		}
+		b, err := json.Marshal(usm)
+		if err != nil {
+			fmt.Printf("Failed to Marshal serve update data into JSON: %v", usm)
+		}
+
+		//fmt.Printf("\nUpdating server at: %s \n", updateURL.String())
+
+		buf := bytes.NewBuffer(b)
+		//fmt.Printf("JSON being sent to update link is: %v \n", buf)
+
+		_, err = http.Post(updateURL.String(), "application/json", buf)
+		if err != nil {
+			fmt.Printf("Failed to connect to server at %v.  Error: %v", updateURL.String(), err)
+			continue
+		}
+
+		//body, err = ioutil.ReadAll(resp.Body)
+		//fmt.Print("\n Response received from POST to update url:\n")
+		//fmt.Print(string(body), "\n")
+
+	}
 }

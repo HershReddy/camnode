@@ -20,8 +20,11 @@ limitations under the License.
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"net/url"
@@ -32,20 +35,32 @@ import (
 
 	"code.google.com/p/goauth2/oauth"
 	"code.google.com/p/google-api-go-client/storage/v1beta2"
+
+	"github.com/BurntSushi/toml"
 )
+
+type AppConfig struct {
+	ClientId     string `toml:"clientId"`
+	ClientSecret string `toml:"clientSecret"`
+	Oauth_code   string `toml:"oauth_code"`
+}
+
+type CheckStatusMessage struct {
+	NewPicRequested bool
+}
+
+type UpdateServerMessage struct {
+	LatestImageURL string
+}
 
 const (
 	// Change these variable to match your personal information.
 	bucketName         = "pipark2014"
 	projectID          = "pipark2014"
-	server_host        = projectID + ".appspot.com"
+	server_host        = "www.pipark2014.appspot.com"
 	server_check_path  = "/clientcheck"
 	server_update_path = "/clientupdate"
 	location_name      = "300ThirdStreet"
-
-	clientId     = "27416394365-napaad4ep26p0ol8dds9od47ml404rpo.apps.googleusercontent.com"
-	clientSecret = "iSiusb81xfteMv5Un3hJGzHs"
-	oauth_code   = "4/nKY1pPvVc07TQyt_yxogZXym5B6R.ImIrNr7AvHkcEnp6UAPFm0HAS7YSiQI"
 
 	fileName       = "./test.jpg"                               // The name of the local file to upload.
 	objectPath     = "parkingspots/imgs/" + location_name + "/" // This can be changed to any valid object path.
@@ -67,17 +82,6 @@ var (
 	// For additional help with OAuth2 setup,
 	// see http://goo.gl/cJ2OC and http://goo.gl/Y0os2
 
-	// Set up a configuration boilerplate.
-	config = &oauth.Config{
-		ClientId:     clientId,
-		ClientSecret: clientSecret,
-		Scope:        scope,
-		AuthURL:      authURL,
-		TokenURL:     tokenURL,
-		TokenCache:   oauth.CacheFile(*cacheFile),
-		RedirectURL:  redirectURL,
-	}
-
 	// Raspistill commands
 	raspistill_cmd  = "raspistill"
 	raspistill_args = [...]string{"-o", "test.jpg", "-w", "640", "-h", "480"}
@@ -91,6 +95,25 @@ func fatalf(service *storage.Service, errorMessage string, args ...interface{}) 
 func main() {
 	flag.Parse()
 
+	var appconfig AppConfig
+	if _, err := toml.DecodeFile("config.toml", &appconfig); err != nil {
+		log.Fatal("App configuration settings failed to load from file config.toml: ", err)
+	}
+	fmt.Println(appconfig.ClientId)
+	fmt.Println(appconfig.ClientSecret)
+	fmt.Println(appconfig.Oauth_code)
+
+	// Set up a configuration boilerplate.
+	config := &oauth.Config{
+		ClientId:     appconfig.ClientId,
+		ClientSecret: appconfig.ClientSecret,
+		Scope:        scope,
+		AuthURL:      authURL,
+		TokenURL:     tokenURL,
+		TokenCache:   oauth.CacheFile(*cacheFile),
+		RedirectURL:  redirectURL,
+	}
+
 	// Set up a transport using the config
 	transport := &oauth.Transport{
 		Config:    config,
@@ -101,13 +124,13 @@ func main() {
 	if err != nil {
 
 		if *code == "" {
-			if oauth_code == "" {
+			if appconfig.Oauth_code == "" {
 				url := config.AuthCodeURL("")
 				fmt.Println("Visit URL to get a code then run again with -code=YOUR_CODE")
 				fmt.Println(url)
 				os.Exit(1)
 			} else {
-				*code = oauth_code
+				*code = appconfig.Oauth_code
 			}
 		}
 
@@ -125,7 +148,7 @@ func main() {
 
 	// If the bucket already exists and the user has access, warn the user, but don't try to create it.
 	if _, err := service.Buckets.Get(bucketName).Do(); err == nil {
-		fmt.Printf("Bucket %s already exists - skipping buckets.insert call.", bucketName)
+		fmt.Printf("Bucket %s already exists - skipping buckets.insert call. \n", bucketName)
 	} else {
 		// Create a bucket.
 		if res, err := service.Buckets.Insert(projectID, &storage.Bucket{Name: bucketName}).Do(); err == nil {
@@ -135,55 +158,108 @@ func main() {
 		}
 	}
 
+	count := 0
 	for {
+		count++
+		fmt.Printf("In update/check loop. Count: %d \n", count)
 
 		time.Sleep(sleep_duration)
-
 		// check server to see if someone has requested a new picture
 
 		checkURL := url.URL{
-			Path: server_check_path + "/" + location_name,
-			Host: server_host,
+			Path:   server_check_path + "/" + location_name,
+			Host:   server_host,
+			Scheme: "http",
 		}
 		resp, err := http.Get(checkURL.String())
 		if err != nil {
-			fmt.Printf("Failed to contact server at %v.  Error: %v", checkURL.String(), err)
+			fmt.Printf("Failed to connect to server at %v.  Error: %v \n", checkURL.String(), err)
 			continue
 		}
 		body, err := ioutil.ReadAll(resp.Body)
+		fmt.Print("\n JSON received from clientcheck URL:\n")
+		fmt.Print(string(body), "\n")
+
+		var csm CheckStatusMessage
+		err = json.Unmarshal(body, &csm)
+
+		if err != nil {
+			log.Fatal("JSON parameters from server in CheckStatusMessage could not be loaded:", err)
+		}
+
+		fmt.Print(csm)
 		resp.Body.Close()
 
-		// take a picture and store it to a local file
-		if !*test {
-			cmd := exec.Command(raspistill_cmd, raspistill_args[0], raspistill_args[1], raspistill_args[2],
-				raspistill_args[3], raspistill_args[4], raspistill_args[5])
-			err = cmd.Run()
-			if err != nil {
-				fatalf(service, "%v. Error capturing image with command: %v and args: %v", err, raspistill_cmd, raspistill_args)
-			}
-		}
+		if csm.NewPicRequested {
 
-		// Insert picture file into a bucket.
-		// We name objects by adding the current time to the object path, after replacing spaces with _
-		objectName := objectPath + strings.Replace(time.Now().String(), " ", "_", -1)
-		object := &storage.Object{Name: objectName}
-		file, err := os.Open(fileName)
-		if err != nil {
-			fatalf(service, "Error opening %q: %v", fileName, err)
-		}
-		if res, err := service.Objects.Insert(bucketName, object).Media(file).Do(); err == nil {
-			fmt.Printf("Created object %v at location %v with media at %v\n\n", res.Name, res.SelfLink, res.MediaLink)
-		} else {
-			fatalf(service, "Objects.Insert failed: %v", err)
-		}
-		// This makes the picture object publicly accesible
-		objectAcl := &storage.ObjectAccessControl{
-			Bucket: bucketName, Entity: entityName, Object: objectName, Role: "READER",
-		}
-		if res, err := service.ObjectAccessControls.Insert(bucketName, objectName, objectAcl).Do(); err == nil {
-			fmt.Printf("Result of inserting ACL for %v/%v:\n%v\n\n", bucketName, objectName, res)
-		} else {
-			fatalf(service, "Failed to insert ACL for %s/%s: %v.", bucketName, objectName, err)
+			fmt.Printf("Taking picture.  Count is: %v \n", count)
+			// take a picture and store it to a local file
+			if !*test {
+				cmd := exec.Command(raspistill_cmd, raspistill_args[0], raspistill_args[1], raspistill_args[2],
+					raspistill_args[3], raspistill_args[4], raspistill_args[5])
+				err = cmd.Run()
+				if err != nil {
+					fatalf(service, "%v. Error capturing image with command: %v and args: %v \n", err, raspistill_cmd, raspistill_args)
+				}
+			}
+			fmt.Printf("Inserting picture into bucket.\n")
+			// Insert picture file into a bucket.
+			// We name objects by adding the current time to the object path, after replacing spaces with _
+			objectName := objectPath + strings.Replace(time.Now().String(), " ", "_", -1)
+			object := &storage.Object{Name: objectName}
+			file, err := os.Open(fileName)
+			var LatestImageURL string
+			if err != nil {
+				fatalf(service, "Error opening %q: %v", fileName, err)
+			}
+			if res, err := service.Objects.Insert(bucketName, object).Media(file).Do(); err == nil {
+				fmt.Printf("Created object with media at:\n %s\n", res.MediaLink)
+				LatestImageURL = res.MediaLink
+			} else {
+				fatalf(service, "Objects.Insert failed: %v", err)
+				LatestImageURL = "Error inserting image into Cloud Storage"
+			}
+
+			// This makes the picture object publicly accesible
+			objectAcl := &storage.ObjectAccessControl{
+				Bucket: bucketName, Entity: entityName, Object: objectName, Role: "READER",
+			}
+			if res, err := service.ObjectAccessControls.Insert(bucketName, objectName, objectAcl).Do(); err == nil {
+				fmt.Printf("Result of inserting ACL for %v/%v:\n%v\n\n", bucketName, objectName, res)
+			} else {
+				fatalf(service, "Failed to insert ACL for %s/%s: %v.", bucketName, objectName, err)
+			}
+
+			// Inform the server about the location of the new picture that has been uploaded to the cloud
+			updateURL := url.URL{
+				Path:   server_update_path + "/" + location_name,
+				Host:   server_host,
+				Scheme: "http",
+			}
+
+			usm := UpdateServerMessage{
+				LatestImageURL: LatestImageURL,
+			}
+			b, err := json.Marshal(usm)
+			if err != nil {
+				fmt.Printf("Failed to Marshal serve update data into JSON: %v", usm)
+			}
+
+			fmt.Printf("\nUpdating server at: %s \n", updateURL.String())
+
+			buf := bytes.NewBuffer(b)
+			fmt.Printf("JSON being sent to update link is: %v \n", buf)
+
+			resp, err = http.Post(updateURL.String(), "application/json", buf)
+			if err != nil {
+				fmt.Printf("Failed to connect to server at %v.  Error: %v", updateURL.String(), err)
+				continue
+			}
+
+			body, err := ioutil.ReadAll(resp.Body)
+			fmt.Print("\n Response received from POST to update url:\n")
+			fmt.Print(string(body), "\n")
+
 		}
 
 	}
